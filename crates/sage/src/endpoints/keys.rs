@@ -1,21 +1,24 @@
 use std::{fs, str::FromStr};
 
 use bip39::Mnemonic;
-use chia::{
-    bls::{
-        master_to_wallet_hardened_intermediate, master_to_wallet_unhardened_intermediate,
-        DerivableKey, PublicKey, SecretKey,
+use chia_wallet_sdk::{
+    chia::{
+        bls::{
+            DerivableKey, master_to_wallet_hardened_intermediate,
+            master_to_wallet_unhardened_intermediate,
+        },
+        puzzle_types::{DeriveSynthetic, standard::StandardArgs},
     },
-    puzzles::{standard::StandardArgs, DeriveSynthetic},
+    prelude::*,
 };
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use sage_api::{
     DeleteDatabase, DeleteDatabaseResponse, DeleteKey, DeleteKeyResponse, GenerateMnemonic,
     GenerateMnemonicResponse, GetKey, GetKeyResponse, GetKeys, GetKeysResponse, GetSecretKey,
-    GetSecretKeyResponse, ImportKey, ImportKeyResponse, KeyInfo, KeyKind, Login, LoginResponse,
-    Logout, LogoutResponse, RenameKey, RenameKeyResponse, Resync, ResyncResponse, SecretKeyInfo,
-    SetWalletEmoji, SetWalletEmojiResponse,
+    GetSecretKeyResponse, GetWalletAddress, GetWalletAddressResponse, ImportKey, ImportKeyResponse,
+    KeyInfo, KeyKind, Login, LoginResponse, Logout, LogoutResponse, RenameKey, RenameKeyResponse,
+    Resync, ResyncResponse, SecretKeyInfo, SetWalletEmoji, SetWalletEmojiResponse,
 };
 use sage_config::Wallet;
 use sage_database::{Database, Derivation};
@@ -107,10 +110,10 @@ impl Sage {
     pub fn generate_mnemonic(&self, req: GenerateMnemonic) -> Result<GenerateMnemonicResponse> {
         let mut rng = ChaCha20Rng::from_entropy();
         let mnemonic = if req.use_24_words {
-            let entropy: [u8; 32] = rng.gen();
+            let entropy: [u8; 32] = rng.r#gen();
             Mnemonic::from_entropy(&entropy)?
         } else {
-            let entropy: [u8; 16] = rng.gen();
+            let entropy: [u8; 16] = rng.r#gen();
             Mnemonic::from_entropy(&entropy)?
         };
         Ok(GenerateMnemonicResponse {
@@ -145,7 +148,30 @@ impl Sage {
                 return Err(Error::InvalidKey);
             }
         } else {
-            let mnemonic = Mnemonic::from_str(&req.key)?;
+            let words: Vec<&str> = req.key.split_whitespace().collect();
+            let word_count = words.len();
+
+            if word_count != 12 && word_count != 24 {
+                return Err(Error::InvalidMnemonic(format!(
+                    "Expected 12 or 24 words, but got {word_count}."
+                )));
+            }
+
+            let mnemonic = Mnemonic::from_str(&req.key).map_err(|e| match e {
+                bip39::Error::BadWordCount(count) => {
+                    Error::InvalidMnemonic(format!("Expected 12 or 24 words, but got {count}."))
+                }
+                bip39::Error::UnknownWord(idx) => Error::InvalidMnemonic(format!(
+                    "Word #{} ({}) is not a valid BIP39 word.",
+                    idx + 1,
+                    words.get(idx).copied().unwrap_or("unknown"),
+                )),
+                bip39::Error::InvalidChecksum => Error::InvalidMnemonic(
+                    "Invalid checksum. Please verify all words are correct and in the right order."
+                        .to_string(),
+                ),
+                _ => Error::InvalidMnemonic(format!("Invalid mnemonic: {e}")),
+            })?;
             let master_sk = SecretKey::from_seed(&mnemonic.to_seed(""));
             let master_pk = master_sk.public_key();
             let fingerprint = if req.save_secrets {
@@ -173,25 +199,29 @@ impl Sage {
 
         let mut tx = db.tx().await?;
 
-        let intermediate_unhardened_pk = master_to_wallet_unhardened_intermediate(&master_pk);
+        if req.unhardened.unwrap_or(true) {
+            let intermediate_unhardened_pk = master_to_wallet_unhardened_intermediate(&master_pk);
 
-        for index in 0..req.derivation_index {
-            let synthetic_key = intermediate_unhardened_pk
-                .derive_unhardened(index)
-                .derive_synthetic();
-            let p2_puzzle_hash = StandardArgs::curry_tree_hash(synthetic_key).into();
-            tx.insert_custody_p2_puzzle(
-                p2_puzzle_hash,
-                synthetic_key,
-                Derivation {
-                    derivation_index: index,
-                    is_hardened: false,
-                },
-            )
-            .await?;
+            for index in 0..req.derivation_index {
+                let synthetic_key = intermediate_unhardened_pk
+                    .derive_unhardened(index)
+                    .derive_synthetic();
+                let p2_puzzle_hash = StandardArgs::curry_tree_hash(synthetic_key).into();
+                tx.insert_custody_p2_puzzle(
+                    p2_puzzle_hash,
+                    synthetic_key,
+                    Derivation {
+                        derivation_index: index,
+                        is_hardened: false,
+                    },
+                )
+                .await?;
+            }
         }
 
-        if let Some(master_sk) = master_sk {
+        if req.hardened.unwrap_or(true)
+            && let Some(master_sk) = master_sk
+        {
             let intermediate_hardened_sk = master_to_wallet_hardened_intermediate(&master_sk);
 
             for index in 0..req.derivation_index {
@@ -211,6 +241,8 @@ impl Sage {
                 .await?;
             }
         }
+
+        tx.insert_arbor_p2_puzzle(master_pk).await?;
 
         tx.commit().await?;
 
@@ -351,5 +383,77 @@ impl Sage {
         }
 
         Ok(GetKeysResponse { keys })
+    }
+
+    pub async fn get_wallet_address(
+        &self,
+        req: GetWalletAddress,
+    ) -> Result<GetWalletAddressResponse> {
+        let Some(master_pk) = self.keychain.extract_public_key(req.fingerprint)? else {
+            return Err(Error::UnknownFingerprint);
+        };
+
+        // Return the change_address override directly if one is configured
+        let wallet_cfg = self
+            .wallet_config
+            .wallets
+            .iter()
+            .find(|w| w.fingerprint == req.fingerprint);
+
+        if let Some(cfg) = wallet_cfg
+            && let Some(change_address) = &cfg.change_address
+        {
+            return Ok(GetWalletAddressResponse {
+                address: change_address.clone(),
+            });
+        }
+
+        let network = self
+            .network_list
+            .by_name(&req.network_id)
+            .ok_or(Error::UnknownFingerprint)?;
+
+        let prefix = network.prefix();
+        let intermediate_pk = master_to_wallet_unhardened_intermediate(&master_pk);
+
+        // Try to read the current receive address from the wallet's DB
+        let p2_puzzle_hash = self
+            .address_from_db(req.fingerprint, &req.network_id, false)
+            .await
+            .ok()
+            .flatten();
+
+        // Fall back to deriving index 0 from the master public key
+        let p2_puzzle_hash = p2_puzzle_hash.unwrap_or_else(|| {
+            let synthetic_key = intermediate_pk.derive_unhardened(0).derive_synthetic();
+            StandardArgs::curry_tree_hash(synthetic_key).into()
+        });
+
+        let address = Address::new(p2_puzzle_hash, prefix).encode()?;
+
+        Ok(GetWalletAddressResponse { address })
+    }
+
+    async fn address_from_db(
+        &self,
+        fingerprint: u32,
+        network_id: &str,
+        hardened: bool,
+    ) -> Result<Option<Bytes32>> {
+        let db_path = self
+            .path
+            .join("wallets")
+            .join(fingerprint.to_string())
+            .join(format!("{network_id}.sqlite"));
+
+        if !db_path.try_exists().unwrap_or(false) {
+            return Ok(None);
+        }
+
+        let pool = self.connect_to_pool(db_path).await?;
+        let db = Database::new(pool);
+        let mut tx = db.read_tx().await?;
+        let index = tx.unused_derivation_index(hardened).await?;
+        Ok(tx.custody_p2_puzzle_hash(index, hardened).await.ok())
     }
 }

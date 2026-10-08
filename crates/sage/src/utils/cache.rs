@@ -1,13 +1,11 @@
 use std::{collections::hash_map::Entry, time::Duration};
 
-use chia::{clvm_traits::FromClvm, protocol::Bytes32, puzzles::nft::NftMetadata};
-use chia_wallet_sdk::types::TESTNET11_CONSTANTS;
-use clvmr::{Allocator, NodePtr};
-use sage_assets::{fetch_uris_with_hash, DexieCat};
+use chia_wallet_sdk::{chia::puzzle_types::nft::NftMetadata, prelude::*};
+use sage_assets::{DexieCat, fetch_uris_with_hash};
 use sage_database::{Asset, AssetKind};
 use tokio::time::timeout;
 
-use crate::{extract_nft_data, ConfirmationInfo, Error, ExtractedNftData, Result, Sage};
+use crate::{ConfirmationInfo, Error, ExtractedNftData, Result, Sage, extract_nft_data};
 
 impl Sage {
     pub async fn cache_cat(
@@ -35,7 +33,7 @@ impl Sage {
                 description: asset.description,
                 is_sensitive_content: false,
                 is_visible: true,
-                hidden_puzzle_hash,
+                hidden_puzzle_hash: asset.hidden_puzzle_hash.or(hidden_puzzle_hash),
                 kind: AssetKind::Token,
             }
         } else {
@@ -58,7 +56,7 @@ impl Sage {
         let mut tx = wallet.db.tx().await?;
 
         if tx.existing_hidden_puzzle_hash(asset_id).await?.is_none() {
-            tx.update_hidden_puzzle_hash(asset_id, hidden_puzzle_hash)
+            tx.update_hidden_puzzle_hash(asset_id, asset.hidden_puzzle_hash.or(hidden_puzzle_hash))
                 .await?;
         }
 
@@ -81,30 +79,28 @@ impl Sage {
         }
 
         let info = if let Ok(metadata) = NftMetadata::from_clvm(allocator, nft_metadata) {
-            if let Some(hash) = metadata.data_hash {
-                if let Entry::Vacant(entry) = confirmation_info.nft_data.entry(hash) {
-                    if let Ok(Some(data)) = timeout(
-                        Duration::from_secs(10),
-                        fetch_uris_with_hash(metadata.data_uris.clone(), hash),
-                    )
-                    .await
-                    {
-                        entry.insert(data);
-                    }
-                }
+            let testnet = self.network().genesis_challenge == TESTNET11_CONSTANTS.genesis_challenge;
+
+            if let Some(hash) = metadata.data_hash
+                && let Entry::Vacant(entry) = confirmation_info.nft_data.entry(hash)
+                && let Ok(Some(data)) = timeout(
+                    Duration::from_secs(10),
+                    fetch_uris_with_hash(metadata.data_uris.clone(), hash, testnet),
+                )
+                .await
+            {
+                entry.insert(data);
             }
 
-            if let Some(hash) = metadata.metadata_hash {
-                if let Entry::Vacant(entry) = confirmation_info.nft_data.entry(hash) {
-                    if let Ok(Some(data)) = timeout(
-                        Duration::from_secs(10),
-                        fetch_uris_with_hash(metadata.metadata_uris.clone(), hash),
-                    )
-                    .await
-                    {
-                        entry.insert(data);
-                    }
-                }
+            if let Some(hash) = metadata.metadata_hash
+                && let Entry::Vacant(entry) = confirmation_info.nft_data.entry(hash)
+                && let Ok(Some(data)) = timeout(
+                    Duration::from_secs(10),
+                    fetch_uris_with_hash(metadata.metadata_uris.clone(), hash, testnet),
+                )
+                .await
+            {
+                entry.insert(data);
             }
 
             extract_nft_data(Some(&wallet.db), Some(metadata), confirmation_info).await?

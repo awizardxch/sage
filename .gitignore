@@ -25,5 +25,10 @@ dist-ssr
 
 # Rust
 target
-/.env
+.env
 /test.sqlite*
+
+/builtin-apps/build/*
+!/builtin-apps/build/dist/
+/builtin-apps/build/dist/*
+!/builtin-apps/build/dist/.gitkeep

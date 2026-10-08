@@ -38,7 +38,7 @@ multiple_crate_versions = "allow"
 must_use_candidate = "allow"
 similar_names = "allow"
 used_underscore_binding = "allow"
-unwrap_used = "warn"
+unwrap_used = "allow"
 wildcard_imports = "allow"
 cast_possible_truncation = "allow"
 cast_sign_loss = "allow"
@@ -55,6 +55,7 @@ sage-database = { path = "./crates/sage-database" }
 sage-keychain = { path = "./crates/sage-keychain" }
 sage-wallet = { path = "./crates/sage-wallet" }
 sage-assets = { path = "./crates/sage-assets" }
+sage-apps = { path = "./crates/sage-apps" }
 sage-rpc = { path = "./crates/sage-rpc" }
 
 # Serialization
@@ -67,31 +68,31 @@ hex = "0.4.3"
 base64 = "0.22.1"
 
 # Tauri
-tauri = "2.5.1"
-tauri-plugin-clipboard-manager = "2.2.2"
-tauri-plugin-opener = "2.2.6"
-tauri-plugin-os = "2.2.1"
-tauri-plugin-window-state = "2.2.2"
-tauri-plugin-barcode-scanner = "2.2.0"
-tauri-plugin-biometric = "2.2.1"
+tauri = { version = "2.10.2", features = ["unstable"] } # Unstable reason: Multiwebview support
+tauri-plugin-clipboard-manager = "2.3.2"
+tauri-plugin-opener = "2.5.3"
+tauri-plugin-os = "2.3.2"
+tauri-plugin-window-state = "2.4.1"
+tauri-plugin-barcode-scanner = "2.4.5"
+tauri-plugin-biometric = "2.3.2"
 tauri-plugin-safe-area-insets = "0.1.0"
 tauri-plugin-sage = { path = "./tauri-plugin-sage" }
-tauri-build = "2.2.0"
-tauri-plugin = "2.2.0"
+tauri-build = "2.5.5"
+tauri-plugin = "2.5.3"
 
 # Specta
-specta = "2.0.0-rc.20"
-specta-typescript = "0.0.7"
-tauri-specta = "2.0.0-rc.20"
+specta = "2.0.0-rc.22"
+specta-typescript = "0.0.9"
+tauri-specta = "2.0.0-rc.21"
+
+# OpenAPI
+utoipa = "5.2.0"
 
 # Chia
-chia = "0.26.0"
-chia_streamable_macro = "0.26.0"
-chia-traits = "0.26.0"
-chia-sha2 = "0.26.0"
-chia-puzzles = "0.20.1"
-clvmr = "0.14.0"
-chia-wallet-sdk = { git = "https://github.com/xch-dev/chia-wallet-sdk", rev = "4ffb3ee1dc8427ee9bee0f14524133463cc54a9d", features = ["rustls", "offer-compression", "peer-simulator"] }
+chia-wallet-sdk = { version = "0.36.0", features = ["rustls", "offer-compression", "peer-simulator"] }
+chia_streamable_macro = "0.36.1"
+chia-traits = "0.36.1"
+chia-sha2 = "0.36.1"
 bip39 = "2.0.0"
 bech32 = "0.9.1"
 rand = "0.8.5"
@@ -111,6 +112,7 @@ indexmap = "2.3.0"
 itertools = "0.13.0"
 anyhow = "1.0.86"
 thiserror = "1.0.63"
+semver = "1"
 hex-literal = "0.4.1"
 glob = "0.3.1"
 num-bigint = "0.4.6"
@@ -123,6 +125,7 @@ expect-test = "1.5.1"
 convert_case = "0.8.0"
 quote = "1.0.38"
 proc-macro2 = "1.0.93"
+syn = "2.0"
 
 # Tracing
 tracing = "0.1.40"
@@ -138,3 +141,13 @@ axum-server = "0.7.1"
 rustls = "0.23.17"
 rustls-pemfile = "2.2.0"
 clap = "4.5.21"
+
+# Testing
+tempfile = "3.25.0"
+tower = "0.5.3"
+
+[patch.crates-io]
+tauri-runtime = { git = "https://github.com/Rigidity/tauri.git", rev = "8b205bb844bd56b4ee027905d1b068553d867ebe" }
+tauri-runtime-wry = { git = "https://github.com/Rigidity/tauri.git", rev = "8b205bb844bd56b4ee027905d1b068553d867ebe" }
+tauri-utils = { git = "https://github.com/Rigidity/tauri.git", rev = "8b205bb844bd56b4ee027905d1b068553d867ebe" }
+wry = { git = "https://github.com/Rigidity/wry.git", rev = "997ce01862c23b0220b95b4b5541e55fd48670ec" }

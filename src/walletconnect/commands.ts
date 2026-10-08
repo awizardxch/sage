@@ -1,9 +1,11 @@
 import { z } from 'zod';
 
+const safeAmount = z.number().or(z.string());
+
 const coinType = z.object({
   parent_coin_info: z.string(),
   puzzle_hash: z.string(),
-  amount: z.number(),
+  amount: safeAmount,
 });
 
 const coinSpendType = z.object({
@@ -17,10 +19,9 @@ const spendBundleType = z.object({
   aggregated_signature: z.string(),
 });
 
-const safeAmount = z.number().or(z.string());
-
 const assetAmount = z.object({
   assetId: z.string(),
+  hiddenPuzzleHash: z.string().optional(),
   amount: safeAmount,
 });
 
@@ -87,6 +88,7 @@ export const walletConnectCommands = {
       .object({
         limit: z.number().optional(),
         offset: z.number().optional(),
+        hardened: z.boolean().optional(),
       })
       .optional(),
     returnType: z.array(z.string()),
@@ -116,7 +118,7 @@ export const walletConnectCommands = {
           .object({
             parentName: z.string().nullable(),
             innerPuzzleHash: z.string().nullable(),
-            amount: z.number().nullable(),
+            amount: safeAmount.nullable(),
           })
           .nullable(),
       }),

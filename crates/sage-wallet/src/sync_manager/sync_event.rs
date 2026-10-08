@@ -1,4 +1,4 @@
-use chia::protocol::Bytes32;
+use chia_wallet_sdk::prelude::*;
 use sage_database::OfferStatus;
 use std::net::IpAddr;
 
@@ -26,4 +26,10 @@ pub enum SyncEvent {
     CatInfo,
     DidInfo,
     NftData,
+    WalletChanged {
+        fingerprint: Option<u32>,
+    },
+    NetworkChanged {
+        network_id: String,
+    },
 }

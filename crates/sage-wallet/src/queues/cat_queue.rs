@@ -34,7 +34,7 @@ impl CatQueue {
     }
 
     async fn process_batch(&self) -> Result<(), WalletError> {
-        let cats = timeout(Duration::from_secs(120), DexieCat::fetch_all(self.testnet)).await??;
+        let cats = timeout(Duration::from_mins(2), DexieCat::fetch_all(self.testnet)).await??;
 
         if cats.is_empty() {
             return Ok(());
@@ -52,7 +52,7 @@ impl CatQueue {
                 description: cat.description,
                 is_sensitive_content: false,
                 is_visible: true,
-                hidden_puzzle_hash: None,
+                hidden_puzzle_hash: cat.hidden_puzzle_hash,
                 kind: AssetKind::Token,
             })
             .await?;

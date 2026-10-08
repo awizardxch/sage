@@ -15,13 +15,13 @@ val tauriProperties = Properties().apply {
 }
 
 android {
-    compileSdk = 35
+    compileSdk = 36
     namespace = "com.rigidnetwork.sage"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "com.rigidnetwork.sage"
         minSdk = 24
-        targetSdk = 35
+        targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
     }
@@ -33,10 +33,16 @@ android {
                 keystoreProperties.load(FileInputStream(keystorePropertiesFile))
             }
 
-            keyAlias = keystoreProperties["keyAlias"] as String
-            keyPassword = keystoreProperties["password"] as String
-            storeFile = file(keystoreProperties["storeFile"] as String)
-            storePassword = keystoreProperties["password"] as String
+            val keyAliasProp = keystoreProperties["keyAlias"] as? String
+            val passwordProp = keystoreProperties["password"] as? String
+            val storeFileProp = keystoreProperties["storeFile"] as? String
+
+            if (keyAliasProp != null && passwordProp != null && storeFileProp != null) {
+                keyAlias = keyAliasProp
+                keyPassword = passwordProp
+                storeFile = file(storeFileProp)
+                storePassword = passwordProp
+            }
         }
     }
     buildTypes {

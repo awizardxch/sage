@@ -1,21 +1,14 @@
 use std::time::Duration;
 
-use chia::{
-    clvm_traits::{FromClvm, ToClvm},
-    protocol::{Bytes32, Coin, CoinSpend, CoinState},
-    puzzles::{
+use chia_wallet_sdk::{
+    chia::puzzle_types::{
         nft::{NftOwnershipLayerSolution, NftStateLayerSolution},
         singleton::{LauncherSolution, SingletonSolution},
-        Memos,
     },
+    driver::SingletonLayer,
+    prelude::*,
+    puzzles::SINGLETON_LAUNCHER_HASH,
 };
-use chia_puzzles::SINGLETON_LAUNCHER_HASH;
-use chia_wallet_sdk::{
-    driver::{DidInfo, NftInfo, OptionInfo, OptionMetadata, Puzzle},
-    prelude::CreateCoin,
-    types::{run_puzzle, Condition, Conditions},
-};
-use clvmr::{Allocator, NodePtr};
 use tokio::time::sleep;
 use tracing::warn;
 
@@ -62,10 +55,12 @@ pub async fn fetch_minter_hash(
     genesis_challenge: Bytes32,
     launcher_id: Bytes32,
 ) -> Result<Option<Bytes32>, WalletError> {
-    let mut did_id = None::<Bytes32>;
+    let mut minter_hash = None::<Bytes32>;
     let mut parent_id = launcher_id;
 
     for _ in 0..5 {
+        let is_pending = peer.is_pending_spend(parent_id);
+
         let Some(parent_spend) = peer
             .fetch_optional_coin_spend(parent_id, genesis_challenge)
             .await?
@@ -78,20 +73,28 @@ pub async fn fetch_minter_hash(
         let puzzle_reveal = parent_spend.puzzle_reveal.to_clvm(&mut allocator)?;
         let puzzle = Puzzle::parse(&allocator, puzzle_reveal);
 
-        if let Some((did, _)) = DidInfo::parse(&allocator, puzzle).ok().flatten() {
-            did_id = Some(did.launcher_id);
+        if let Some(singleton) = SingletonLayer::<Puzzle>::parse_puzzle(&allocator, puzzle)
+            .ok()
+            .flatten()
+        {
+            minter_hash = Some(singleton.launcher_id);
             break;
         }
 
         parent_id = parent_spend.coin.parent_coin_info;
 
-        sleep(Duration::from_secs(1)).await;
+        // Coins from our own pending transaction are already known locally, so there's
+        // no propagation delay to wait out before looking up their parent in turn.
+        if !is_pending {
+            sleep(Duration::from_secs(1)).await;
+        }
     }
 
-    if did_id.is_none() {
+    if minter_hash.is_none()
+        && let Some(child) = peer.try_fetch_singleton_child(launcher_id).await?
+        && let Some(spent_height) = child.spent_height
+    {
         let coin_spend = {
-            let child = peer.fetch_singleton_child(launcher_id).await?;
-            let spent_height = child.spent_height.ok_or(WalletError::PeerMisbehaved)?;
             let (puzzle_reveal, solution) = peer
                 .fetch_puzzle_solution(child.coin.coin_id(), spent_height)
                 .await?;
@@ -104,26 +107,25 @@ pub async fn fetch_minter_hash(
         let solution = coin_spend.solution.to_clvm(&mut allocator)?;
         let puzzle = Puzzle::parse(&allocator, puzzle_reveal);
 
-        if let Some((_nft_info, p2_puzzle)) = NftInfo::parse(&allocator, puzzle).ok().flatten() {
-            if let Ok(solution) = SingletonSolution::<
+        if let Some((_nft_info, p2_puzzle)) = NftInfo::parse(&allocator, puzzle).ok().flatten()
+            && let Ok(solution) = SingletonSolution::<
                 NftStateLayerSolution<NftOwnershipLayerSolution<NodePtr>>,
             >::from_clvm(&allocator, solution)
-            {
-                let p2_solution = solution.inner_solution.inner_solution.inner_solution;
+        {
+            let p2_solution = solution.inner_solution.inner_solution.inner_solution;
 
-                if let Ok(output) = run_puzzle(&mut allocator, p2_puzzle.ptr(), p2_solution) {
-                    if let Ok(conditions) = Conditions::<NodePtr>::from_clvm(&allocator, output) {
-                        did_id = conditions.into_iter().find_map(|cond| match cond {
-                            Condition::TransferNft(transfer) => transfer.launcher_id,
-                            _ => None,
-                        });
-                    }
-                }
+            if let Ok(output) = run_puzzle(&mut allocator, p2_puzzle.ptr(), p2_solution)
+                && let Ok(conditions) = Conditions::<NodePtr>::from_clvm(&allocator, output)
+            {
+                minter_hash = conditions.into_iter().find_map(|cond| match cond {
+                    Condition::TransferNft(transfer) => transfer.launcher_id,
+                    _ => None,
+                });
             }
         }
     }
 
-    Ok(did_id)
+    Ok(minter_hash)
 }
 
 #[derive(Debug, Clone)]

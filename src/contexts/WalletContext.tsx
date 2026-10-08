@@ -1,12 +1,22 @@
 import { KeyInfo, commands } from '@/bindings';
-import { useErrors } from '@/hooks/useErrors';
-import { createContext, useContext, useEffect, useState } from 'react';
-import { initializeWalletState, fetchState } from '@/state';
 import { CustomError } from '@/contexts/ErrorContext';
+import { useErrors } from '@/hooks/useErrors';
+import { useColdWalletUnsigned } from '@/hooks/useColdWalletUnsigned';
+import { fetchState, initializeWalletState } from '@/state';
+import { createContext, useContext, useEffect, useState } from 'react';
 
 interface WalletContextType {
   wallet: KeyInfo | null;
   setWallet: (wallet: KeyInfo | null) => void;
+  isSwitching: boolean;
+  setIsSwitching: (isSwitching: boolean) => void;
+  /** True when the wallet has no signing keys (cold/watch-only wallet). */
+  isReadOnly: boolean;
+  /** True when the user has opted in to building unsigned transactions on cold wallets. */
+  allowUnsigned: boolean;
+  /** True when transaction-initiating UI should be disabled.
+   *  Equivalent to `isReadOnly && !allowUnsigned`. */
+  isTransactionDisabled: boolean;
 }
 
 export const WalletContext = createContext<WalletContextType | undefined>(
@@ -15,7 +25,12 @@ export const WalletContext = createContext<WalletContextType | undefined>(
 
 export function WalletProvider({ children }: { children: React.ReactNode }) {
   const [wallet, setWallet] = useState<KeyInfo | null>(null);
+  const [isSwitching, setIsSwitching] = useState(false);
   const { addError } = useErrors();
+  const { allowUnsigned } = useColdWalletUnsigned();
+
+  const isReadOnly = wallet !== null && wallet.has_secrets === false;
+  const isTransactionDisabled = isReadOnly && !allowUnsigned;
 
   useEffect(() => {
     const init = async () => {
@@ -25,7 +40,11 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         setWallet(data.key);
         await fetchState();
       } catch (error) {
-        addError(error as CustomError);
+        const customError = error as CustomError;
+        // Don't add unauthorized errors - they're expected when not logged in
+        if (customError.kind !== 'unauthorized') {
+          addError(customError);
+        }
       }
     };
 
@@ -33,7 +52,17 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   }, [addError]);
 
   return (
-    <WalletContext.Provider value={{ wallet, setWallet }}>
+    <WalletContext.Provider
+      value={{
+        wallet,
+        setWallet,
+        isSwitching,
+        setIsSwitching,
+        isReadOnly,
+        allowUnsigned,
+        isTransactionDisabled,
+      }}
+    >
       {children}
     </WalletContext.Provider>
   );

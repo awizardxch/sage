@@ -1,5 +1,5 @@
-use chia::protocol::Bytes32;
 use chia_sha2::Sha256;
+use chia_wallet_sdk::prelude::*;
 use sage_assets::{Chip0007Metadata, Collection};
 use sage_database::CollectionRow;
 use tracing::debug;
@@ -40,9 +40,9 @@ pub fn compute_nft_info(did_id: Option<Bytes32>, blob: &[u8]) -> ComputedNftInfo
         let attributes = attributes.unwrap_or_default();
         Some(CollectionRow {
             description: None,
-            hash: calculate_collection_id(did_id, &metadata_collection_id.to_string()),
+            hash: calculate_collection_id(did_id, &metadata_collection_id),
             minter_hash: did_id,
-            uuid: metadata_collection_id.to_string(),
+            uuid: metadata_collection_id,
             name: Some(name),
             icon_url: attributes.iter().find_map(|item| {
                 match (item.kind.as_str(), item.value.as_str()) {

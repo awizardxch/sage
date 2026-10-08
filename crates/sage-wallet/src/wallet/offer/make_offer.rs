@@ -1,16 +1,11 @@
-use chia::{
-    bls::Signature,
-    protocol::{Bytes32, SpendBundle},
-    puzzles::{
-        offer::{NotarizedPayment, Payment},
-        Memos,
+use chia_wallet_sdk::{
+    chia::puzzle_types::offer::{NotarizedPayment, Payment},
+    driver::{
+        TransferNftById, calculate_royalty_payments, calculate_trade_price_amounts,
+        calculate_trade_prices,
     },
-};
-use chia_puzzles::SETTLEMENT_PAYMENT_HASH;
-use chia_wallet_sdk::driver::{
-    calculate_royalty_payments, calculate_trade_price_amounts, calculate_trade_prices, Action,
-    AssetInfo, Id, NftAssetInfo, Offer, OfferAmounts, OptionAssetInfo, RequestedPayments,
-    RoyaltyInfo, SpendContext, Spends, TransferNftById,
+    prelude::*,
+    puzzles::SETTLEMENT_PAYMENT_HASH,
 };
 use indexmap::IndexMap;
 use itertools::Itertools;
@@ -26,14 +21,21 @@ pub struct Offered {
     pub options: Vec<Bytes32>,
     pub fee: u64,
     pub p2_puzzle_hash: Option<Bytes32>,
+    pub selected_coin_ids: Vec<Bytes32>,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct Requested {
     pub xch: u64,
-    pub cats: IndexMap<Bytes32, u64>,
+    pub cats: IndexMap<Bytes32, RequestedCat>,
     pub nfts: IndexMap<Bytes32, NftOfferInfo>,
     pub options: IndexMap<Bytes32, OptionOfferInfo>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RequestedCat {
+    pub amount: u64,
+    pub hidden_puzzle_hash: Option<Bytes32>,
 }
 
 impl Wallet {
@@ -44,6 +46,7 @@ impl Wallet {
         expires_at: Option<u64>,
     ) -> Result<SpendBundle, WalletError> {
         let mut ctx = SpendContext::new();
+        let mut asset_info = AssetInfo::new();
 
         let change_puzzle_hash = self.change_p2_puzzle_hash().await?;
 
@@ -54,7 +57,14 @@ impl Wallet {
 
         let requested_amounts = OfferAmounts {
             xch: requested.xch,
-            cats: requested.cats.clone(),
+            cats: requested
+                .cats
+                .iter()
+                .map(|(asset_id, cat)| {
+                    asset_info.insert_cat(*asset_id, CatAssetInfo::new(cat.hidden_puzzle_hash))?;
+                    Ok((*asset_id, cat.amount))
+                })
+                .collect::<Result<_, WalletError>>()?,
         };
 
         let offer_royalties = requested
@@ -122,12 +132,13 @@ impl Wallet {
         let hint = ctx.hint(p2_puzzle_hash)?;
 
         // Add requested payments
-        let mut spends = Spends::new(change_puzzle_hash);
+        let mut spends = self
+            .prepare_spends_for_selection(&mut ctx, &offered.selected_coin_ids)
+            .await?;
         self.select_spends(&mut ctx, &mut spends, &actions).await?;
 
         let nonce = Offer::nonce(spends.non_settlement_coin_ids());
 
-        let mut asset_info = AssetInfo::new();
         let mut requested_payments = RequestedPayments::new();
 
         if requested.xch > 0 {
@@ -137,14 +148,14 @@ impl Wallet {
             ));
         }
 
-        for (asset_id, amount) in requested.cats {
+        for (asset_id, cat) in requested.cats {
             requested_payments
                 .cats
                 .entry(asset_id)
                 .or_default()
                 .push(NotarizedPayment::new(
                     nonce,
-                    vec![Payment::new(p2_puzzle_hash, amount, hint)],
+                    vec![Payment::new(p2_puzzle_hash, cat.amount, hint)],
                 ));
         }
 

@@ -1,12 +1,9 @@
-use chia::{
-    clvm_utils::ToTreeHash,
-    protocol::{Bytes, Bytes32, CoinSpend},
-};
-use chia_wallet_sdk::driver::{Action, ClawbackV2, Id, SpendContext};
+use chia_wallet_sdk::prelude::*;
+use sage_database::{CoinKind, P2Puzzle};
 
 use crate::{
-    wallet::memos::{calculate_memos, Hint},
     WalletError,
+    wallet::memos::{Hint, calculate_memos},
 };
 
 use super::Wallet;
@@ -53,12 +50,95 @@ impl Wallet {
 
         Ok(ctx.take())
     }
+
+    pub async fn finalize_clawback(
+        &self,
+        coin_ids: Vec<Bytes32>,
+        fee: u64,
+    ) -> Result<Vec<CoinSpend>, WalletError> {
+        let mut ctx = SpendContext::new();
+
+        for &coin_id in &coin_ids {
+            let Some(coin_kind) = self.db.coin_kind(coin_id).await? else {
+                return Err(WalletError::MissingCoin(coin_id));
+            };
+
+            match coin_kind {
+                CoinKind::Xch => {
+                    let Some(coin) = self.db.xch_coin(coin_id).await? else {
+                        return Err(WalletError::MissingXchCoin(coin_id));
+                    };
+
+                    let P2Puzzle::Clawback(clawback) = self.db.p2_puzzle(coin.puzzle_hash).await?
+                    else {
+                        return Err(WalletError::MissingClawbackInfo(coin_id));
+                    };
+
+                    let clawback = ClawbackV2::new(
+                        clawback.sender_puzzle_hash,
+                        clawback.receiver_puzzle_hash,
+                        clawback.seconds,
+                        coin.amount,
+                        false,
+                    );
+
+                    clawback.push_through_coin_spend(&mut ctx, coin)?;
+                }
+                CoinKind::Cat => {
+                    let Some(cat) = self.db.cat_coin(coin_id).await? else {
+                        return Err(WalletError::MissingCatCoin(coin_id));
+                    };
+
+                    let P2Puzzle::Clawback(clawback) =
+                        self.db.p2_puzzle(cat.info.p2_puzzle_hash).await?
+                    else {
+                        return Err(WalletError::MissingClawbackInfo(coin_id));
+                    };
+
+                    let clawback = ClawbackV2::new(
+                        clawback.sender_puzzle_hash,
+                        clawback.receiver_puzzle_hash,
+                        clawback.seconds,
+                        cat.coin.amount,
+                        true,
+                    );
+
+                    let spend = clawback.push_through_spend(&mut ctx)?;
+                    Cat::spend_all(&mut ctx, &[CatSpend::new(cat, spend)])?;
+                }
+                _ => {
+                    return Err(WalletError::UnsupportedClawbackCoinKind(coin_kind));
+                }
+            }
+        }
+
+        if fee > 0 {
+            let actions = [Action::fee(fee)];
+
+            let mut spends = self.prepare_spends_for_selection(&mut ctx, &[]).await?;
+            self.select_spends_excluding(&mut ctx, &mut spends, &actions, &coin_ids)
+                .await?;
+
+            for &coin_id in &coin_ids {
+                spends
+                    .conditions
+                    .required
+                    .push(AssertConcurrentSpend::new(coin_id));
+            }
+
+            let deltas = spends.apply(&mut ctx, &actions)?;
+            self.complete_spends(&mut ctx, &deltas, spends).await?;
+        }
+
+        Ok(ctx.take())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
+    use sage_database::P2Puzzle;
     use test_log::test;
     use tokio::time::sleep;
 
@@ -239,6 +319,62 @@ mod tests {
 
         assert_eq!(bob.wallet.db.selectable_xch_balance().await?, 0);
         assert_eq!(bob.wallet.db.selectable_xch_coins().await?.len(), 0);
+
+        Ok(())
+    }
+
+    #[test(tokio::test)]
+    async fn test_finalize_clawback_with_fee_excludes_clawback_coin() -> anyhow::Result<()> {
+        let mut test = TestWallet::new(3000).await?;
+        let timestamp = test.new_block_with_current_time().await?;
+
+        let coin_spends = test
+            .wallet
+            .send_xch(
+                vec![(test.puzzle_hash, 1000)],
+                0,
+                vec![],
+                Some(timestamp + 1),
+            )
+            .await?;
+
+        test.transact(coin_spends).await?;
+        test.wait_for_coins().await;
+
+        sleep(Duration::from_secs(2)).await;
+        test.new_block_with_current_time().await?;
+
+        let mut clawback_coin_id = None;
+        for coin in test.wallet.db.selectable_xch_coins().await? {
+            if matches!(
+                test.wallet.db.p2_puzzle(coin.puzzle_hash).await?,
+                P2Puzzle::Clawback(_)
+            ) {
+                clawback_coin_id = Some(coin.coin_id());
+                break;
+            }
+        }
+        let clawback_coin_id = clawback_coin_id.expect("missing expired clawback coin");
+
+        let coin_spends = test
+            .wallet
+            .finalize_clawback(vec![clawback_coin_id], 1)
+            .await?;
+
+        assert_eq!(coin_spends.len(), 2);
+
+        test.transact(coin_spends).await?;
+        test.wait_for_coins().await;
+
+        assert!(
+            test.wallet
+                .db
+                .selectable_xch_coins()
+                .await?
+                .iter()
+                .all(|coin| coin.coin_id() != clawback_coin_id)
+        );
+        assert_eq!(test.wallet.db.selectable_xch_balance().await?, 2999);
 
         Ok(())
     }

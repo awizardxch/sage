@@ -39,22 +39,30 @@ Install the frontend dependencies:
 pnpm install
 ```
 
+#### Windows
+
+The build process on Windows requires CMake, Clang and NASM installed.
+
+```powershell
+choco install cmake llvm nasm
+```
+
 ### Starting the app
 
 You can run the app with:
 
 ```bash
 # For development purposes:
-pnpm tauri dev
+pnpm tauri:dev
 
 # If you need optimizations:
-pnpm tauri dev --release
+pnpm tauri:dev --release
 ```
 
 And build the application with:
 
 ```bash
-pnpm tauri build
+pnpm tauri:build
 ```
 
 You can also run the app in the iOS or Android simulator, though it may take some prior setup:
@@ -116,3 +124,5 @@ The following things have to be done before a new release is published:
 4. Run `pnpm extract` to extract new translations
 5. Create a new tagged release
 6. Upload to TestFlight and the Google Play Store
+7. Generate the OpenAPI specification `cargo run --bin sage rpc generate_openapi -o dist/openapi.json`
+8. Upload to docusaurus

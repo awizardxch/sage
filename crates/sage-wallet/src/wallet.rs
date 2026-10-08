@@ -3,21 +3,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use chia::{
-    bls::PublicKey,
-    clvm_utils::ToTreeHash,
-    protocol::{Bytes32, Coin},
-    puzzles::offer::SettlementPaymentsSolution,
-};
-use chia_puzzles::SETTLEMENT_PAYMENT_HASH;
 use chia_wallet_sdk::{
-    driver::{
-        Action, Cat, ClawbackV2, Deltas, DriverError, Id, Layer, OptionUnderlying, Outputs,
-        Relation, SettlementLayer, SpendContext, SpendKind, SpendWithConditions, SpendableAsset,
-        Spends, StandardLayer,
-    },
-    signer::AggSigConstants,
-    utils::select_coins,
+    chia::puzzle_types::offer::SettlementPaymentsSolution,
+    driver::{P2DelegatedConditionsLayer, SpendKind, SpendableAsset},
+    prelude::*,
+    puzzles::SETTLEMENT_PAYMENT_HASH,
+    types::puzzles::P2DelegatedConditionsSolution,
 };
 use indexmap::IndexMap;
 use sage_database::{AssetKind, CoinKind, Database, DeserializePrimitive, P2Puzzle};
@@ -34,6 +25,7 @@ mod options;
 mod signing;
 mod xch;
 
+pub use memos::*;
 pub use multi_send::*;
 pub use nfts::*;
 pub use offer::*;
@@ -75,10 +67,10 @@ impl Wallet {
         amount: u64,
         selected_coin_ids: &HashSet<Bytes32>,
     ) -> Result<Vec<Coin>, WalletError> {
-        let mut spendable_coins = self.db.selectable_xch_coins().await?;
-        spendable_coins.retain(|coin| !selected_coin_ids.contains(&coin.coin_id()));
+        let mut selectable_coins = self.db.selectable_xch_coins().await?;
+        selectable_coins.retain(|coin| !selected_coin_ids.contains(&coin.coin_id()));
 
-        Ok(select_coins(spendable_coins, amount)?)
+        Ok(select_coins(selectable_coins, amount)?)
     }
 
     async fn select_cat_coins(
@@ -91,14 +83,14 @@ impl Wallet {
         cat_coins.retain(|cat| !selected_coin_ids.contains(&cat.coin.coin_id()));
 
         let mut cats = HashMap::new();
-        let mut spendable_coins = Vec::new();
+        let mut selectable_coins = Vec::new();
 
         for cat in cat_coins {
             cats.insert(cat.coin, cat);
-            spendable_coins.push(cat.coin);
+            selectable_coins.push(cat.coin);
         }
 
-        Ok(select_coins(spendable_coins, amount)?
+        Ok(select_coins(selectable_coins, amount)?
             .into_iter()
             .map(|coin| cats[&coin])
             .collect())
@@ -199,6 +191,17 @@ impl Wallet {
         spends: &mut Spends,
         actions: &[Action],
     ) -> Result<(), WalletError> {
+        self.select_spends_excluding(ctx, spends, actions, &[])
+            .await
+    }
+
+    pub async fn select_spends_excluding(
+        &self,
+        ctx: &mut SpendContext,
+        spends: &mut Spends,
+        actions: &[Action],
+        excluded_coin_ids: &[Bytes32],
+    ) -> Result<(), WalletError> {
         let mut deltas = Deltas::from_actions(actions);
 
         deltas.update(Id::Xch).input += spends.xch.selected_amount();
@@ -207,20 +210,23 @@ impl Wallet {
             deltas.update(id).input += cat.selected_amount();
         }
 
-        let selected_coin_ids: HashSet<Bytes32> =
+        let mut selected_coin_ids: HashSet<Bytes32> =
             spends.non_settlement_coin_ids().into_iter().collect();
+        selected_coin_ids.extend(excluded_coin_ids);
 
         for &id in deltas.ids() {
             let delta = deltas.get(&id).copied().unwrap_or_default();
             let required_amount = delta.output.saturating_sub(delta.input);
 
-            if required_amount == 0 && !deltas.is_needed(&id) {
-                continue;
-            }
-
             match id {
                 Id::New(_) => {}
                 Id::Xch => {
+                    if required_amount == 0
+                        && (!deltas.is_needed(&id) || spends.xch.selected_amount() > 0)
+                    {
+                        continue;
+                    }
+
                     let coins = self
                         .select_xch_coins(required_amount, &selected_coin_ids)
                         .await?;
@@ -231,6 +237,16 @@ impl Wallet {
                 }
                 Id::Existing(asset_id) => match self.db.asset_kind(asset_id).await? {
                     Some(AssetKind::Token) => {
+                        if required_amount == 0
+                            && (!deltas.is_needed(&id)
+                                || spends
+                                    .cats
+                                    .get(&id)
+                                    .is_some_and(|c| c.selected_amount() > 0))
+                        {
+                            continue;
+                        }
+
                         let coins = self
                             .select_cat_coins(asset_id, required_amount, &selected_coin_ids)
                             .await?;
@@ -240,6 +256,10 @@ impl Wallet {
                         }
                     }
                     Some(AssetKind::Did) => {
+                        if required_amount == 0 && !deltas.is_needed(&id) && delta.output == 0 {
+                            continue;
+                        }
+
                         let did = self
                             .db
                             .did(asset_id)
@@ -249,6 +269,10 @@ impl Wallet {
                         spends.add(did.deserialize(ctx)?);
                     }
                     Some(AssetKind::Nft) => {
+                        if required_amount == 0 && !deltas.is_needed(&id) && delta.output == 0 {
+                            continue;
+                        }
+
                         let nft = self
                             .db
                             .nft(asset_id)
@@ -258,6 +282,10 @@ impl Wallet {
                         spends.add(nft.deserialize(ctx)?);
                     }
                     Some(AssetKind::Option) => {
+                        if required_amount == 0 && !deltas.is_needed(&id) && delta.output == 0 {
+                            continue;
+                        }
+
                         let option = self
                             .db
                             .option(asset_id)
@@ -266,7 +294,13 @@ impl Wallet {
 
                         spends.add(option);
                     }
-                    None => return Err(WalletError::MissingAsset(asset_id)),
+                    None => {
+                        if required_amount == 0 && !deltas.is_needed(&id) {
+                            continue;
+                        }
+
+                        return Err(WalletError::MissingAsset(asset_id));
+                    }
                 },
             }
         }
@@ -294,21 +328,25 @@ impl Wallet {
 
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
 
-        Ok(spends.finish(
-            ctx,
-            deltas,
-            Relation::AssertConcurrent,
-            |ctx, asset, kind| match kind {
+        let spends = spends.prepare(ctx, deltas, Relation::AssertConcurrent)?;
+        let mut coin_spends = HashMap::new();
+
+        for (asset, kind) in spends.unspent() {
+            let spend = match kind {
                 SpendKind::Conditions(spend) => {
                     let Some(p2_puzzle) = p2_puzzles.get(&asset.p2_puzzle_hash()) else {
-                        return Err(DriverError::MissingKey);
+                        return Err(DriverError::MissingKey.into());
                     };
 
                     match p2_puzzle {
                         P2Puzzle::PublicKey(public_key) => StandardLayer::new(*public_key)
-                            .spend_with_conditions(ctx, spend.finish()),
+                            .spend_with_conditions(ctx, spend.finish())?,
                         P2Puzzle::Clawback(clawback) => {
-                            let custody = StandardLayer::new(clawback.public_key);
+                            let Some(public_key) = clawback.public_key else {
+                                return Err(DriverError::MissingKey.into());
+                            };
+
+                            let custody = StandardLayer::new(public_key);
                             let spend = custody.spend_with_conditions(ctx, spend.finish())?;
 
                             let clawback = ClawbackV2::new(
@@ -325,15 +363,16 @@ impl Wallet {
                                 custody.tree_hash() == clawback.sender_puzzle_hash.into();
 
                             if is_sender && timestamp < clawback.seconds {
-                                clawback.sender_spend(ctx, spend)
+                                clawback.sender_spend(ctx, spend)?
                             } else if is_receiver && timestamp >= clawback.seconds {
-                                clawback.receiver_spend(ctx, spend)
+                                clawback.receiver_spend(ctx, spend)?
                             } else if is_sender || is_receiver {
-                                Err(DriverError::Custom(
+                                return Err(DriverError::Custom(
                                     "Cannot fulfill clawback spend".to_string(),
-                                ))
+                                )
+                                .into());
                             } else {
-                                Err(DriverError::MissingKey)
+                                return Err(DriverError::MissingKey.into());
                             }
                         }
                         P2Puzzle::Option(underlying) => {
@@ -349,16 +388,27 @@ impl Wallet {
                             );
 
                             if asset.p2_puzzle_hash() != underlying.tree_hash().into() {
-                                return Err(DriverError::MissingKey);
+                                return Err(DriverError::MissingKey.into());
                             }
 
-                            underlying.clawback_spend(ctx, spend)
+                            underlying.clawback_spend(ctx, spend)?
                         }
+                        P2Puzzle::Arbor(key) => P2DelegatedConditionsLayer::new(*key)
+                            .construct_spend(
+                                ctx,
+                                P2DelegatedConditionsSolution::new(
+                                    spend.finish().into_iter().collect(),
+                                ),
+                            )?,
                     }
                 }
                 SpendKind::Settlement(spend) => SettlementLayer
-                    .construct_spend(ctx, SettlementPaymentsSolution::new(spend.finish())),
-            },
-        )?)
+                    .construct_spend(ctx, SettlementPaymentsSolution::new(spend.finish()))?,
+            };
+
+            coin_spends.insert(asset.coin().coin_id(), spend);
+        }
+
+        Ok(spends.spend(ctx, coin_spends)?)
     }
 }

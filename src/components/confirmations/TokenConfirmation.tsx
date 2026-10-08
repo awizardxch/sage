@@ -1,15 +1,29 @@
 import { CoinRecord } from '@/bindings';
 import { CopyButton } from '@/components/CopyButton';
+import { MemoDisplay } from '@/components/MemoDisplay.tsx';
+import { formatNumber } from '@/i18n.ts';
+import { offersEnabled } from '@/lib/features';
 import { fromMojos } from '@/lib/utils';
+import { formatMemo, Memo } from '@/types/CoinMemo.ts';
 import { t } from '@lingui/core/macro';
-import { Trans } from '@lingui/react/macro';
-import { CoinsIcon, MergeIcon, SplitIcon } from 'lucide-react';
+import { Plural, Trans } from '@lingui/react/macro';
+import {
+  CoinsIcon,
+  MergeIcon,
+  SplitIcon,
+  TriangleAlertIcon,
+} from 'lucide-react';
 import { toast } from 'react-toastify';
-import { formatNumber } from '../../i18n';
 import { ConfirmationAlert } from './ConfirmationAlert';
 import { ConfirmationCard } from './ConfirmationCard';
 
-type TokenOperationType = 'split' | 'combine' | 'issue' | 'send' | 'clawback';
+type TokenOperationType =
+  | 'split'
+  | 'combine'
+  | 'issue'
+  | 'send'
+  | 'clawback'
+  | 'finalize_clawback';
 
 interface TokenConfirmationProps {
   type: TokenOperationType;
@@ -19,7 +33,8 @@ interface TokenConfirmationProps {
   precision?: number;
   name?: string;
   amount?: string;
-  currentMemo?: string;
+  revocable?: boolean;
+  currentMemo?: Memo;
 }
 
 export function TokenConfirmation({
@@ -30,6 +45,7 @@ export function TokenConfirmation({
   precision,
   name,
   amount,
+  revocable,
   currentMemo,
 }: TokenConfirmationProps) {
   const config = {
@@ -37,10 +53,15 @@ export function TokenConfirmation({
       icon: SplitIcon,
       title: <Trans>Split Coins</Trans>,
       variant: 'info' as const,
-      message: (
+      message: offersEnabled ? (
         <Trans>
           You are splitting coins into multiple coins of equal value. This can
           help with parallel transactions and offer creation.
+        </Trans>
+      ) : (
+        <Trans>
+          You are splitting coins into multiple coins of equal value. This can
+          help with parallel transactions.
         </Trans>
       ),
     },
@@ -60,10 +81,18 @@ export function TokenConfirmation({
       title: <Trans>Token Issuance</Trans>,
       variant: 'info' as const,
       message: (
-        <Trans>
-          You are issuing a new token. This will create a CAT (Chia Asset Token)
-          that can be sent to other users and traded on exchanges.
-        </Trans>
+        <>
+          <Trans>
+            You are issuing a new token. This will create a CAT (Chia Asset
+            Token) that can be sent to other users and traded on exchanges.
+          </Trans>{' '}
+          {revocable && (
+            <Trans>
+              This wallet&apos;s change address will be used as the revocation
+              address.
+            </Trans>
+          )}
+        </>
       ),
     },
     clawback: {
@@ -83,9 +112,23 @@ export function TokenConfirmation({
       variant: 'info' as const,
       message: null,
     },
+    finalize_clawback: {
+      icon: CoinsIcon,
+      title: <Trans>Finalize Clawback</Trans>,
+      variant: 'info' as const,
+      message: (
+        <Trans>
+          You are about to finalize the clawback transaction. This will send the
+          funds to the original recipient (even if the recipient wallet does not
+          support clawbacks).
+        </Trans>
+      ),
+    },
   };
 
   const { icon: Icon, title, variant, message } = config[type];
+
+  const coinCount = coins?.length ?? 0;
 
   const totalAmount =
     coins?.reduce((acc, coin) => acc + BigInt(coin.amount), BigInt(0)) ??
@@ -104,14 +147,27 @@ export function TokenConfirmation({
         </ConfirmationAlert>
       )}
 
+      {type === 'issue' && revocable && (
+        <ConfirmationAlert
+          icon={TriangleAlertIcon}
+          title={<Trans>Revocable CAT Warning</Trans>}
+          variant='warning'
+        >
+          <Trans>
+            Only issue a revocable CAT if you understand the risks. Sage cannot
+            revoke it; revocation currently requires external tools.
+          </Trans>
+        </ConfirmationAlert>
+      )}
+
       {type === 'send' && currentMemo && (
         <ConfirmationCard>
           <div className='flex items-center justify-between'>
             <div className='break-words whitespace-pre-wrap flex-1'>
-              {currentMemo}
+              <MemoDisplay memo={currentMemo} />
             </div>
             <CopyButton
-              value={currentMemo}
+              value={formatMemo(currentMemo)}
               className='h-4 w-4 shrink-0 ml-2'
               onCopy={() => toast.success(t`Data copied to clipboard`)}
             />
@@ -124,7 +180,7 @@ export function TokenConfirmation({
           icon={<CoinsIcon className='h-8 w-8 text-blue-500' />}
           title={name}
         >
-          <div className='grid grid-cols-2 gap-2'>
+          <div className='grid grid-cols-3 gap-2'>
             <div>
               <div className='text-muted-foreground text-xs mb-1'>
                 <Trans>Ticker</Trans>
@@ -146,23 +202,52 @@ export function TokenConfirmation({
                 {ticker}
               </div>
             </div>
+
+            <div>
+              <div className='text-muted-foreground text-xs mb-1'>
+                <Trans>Revocable</Trans>
+              </div>
+              <div className='font-medium'>
+                {revocable ? <Trans>Yes</Trans> : <Trans>No</Trans>}
+              </div>
+            </div>
           </div>
         </ConfirmationCard>
       )}
 
-      {(type === 'split' || type === 'combine' || type === 'clawback') &&
+      {(type === 'split' ||
+        type === 'combine' ||
+        type === 'clawback' ||
+        type === 'finalize_clawback') &&
         coins && (
           <>
             <ConfirmationCard
               title={
-                <Trans>
-                  {type === 'split'
-                    ? 'Split'
-                    : type === 'combine'
-                      ? 'Combine'
-                      : 'Claw back'}{' '}
-                  {coins.length} coin{coins.length === 1 ? '' : 's'}
-                </Trans>
+                type === 'split' ? (
+                  <Plural
+                    value={coinCount}
+                    one='Split # coin'
+                    other='Split # coins'
+                  />
+                ) : type === 'combine' ? (
+                  <Plural
+                    value={coinCount}
+                    one='Combine # coin'
+                    other='Combine # coins'
+                  />
+                ) : type === 'clawback' ? (
+                  <Plural
+                    value={coinCount}
+                    one='Claw back # coin'
+                    other='Claw back # coins'
+                  />
+                ) : (
+                  <Plural
+                    value={coinCount}
+                    one='Finalize clawback # coin'
+                    other='Finalize clawback # coins'
+                  />
+                )
               }
             >
               <div className='space-y-2 max-h-40 overflow-y-auto'>
@@ -209,12 +294,19 @@ export function TokenConfirmation({
                       <Trans>{outputCount} coins</Trans>
                     ) : type === 'combine' ? (
                       <Trans>1 combined coin</Trans>
-                    ) : (
-                      <Trans>
-                        {coins.length} clawed back coin {coins.length} coin
-                        {coins.length === 1 ? '' : 's'}
-                      </Trans>
-                    )}
+                    ) : type === 'clawback' ? (
+                      <Plural
+                        value={coinCount}
+                        one='# clawed back coin'
+                        other='# clawed back coins'
+                      />
+                    ) : type === 'finalize_clawback' ? (
+                      <Plural
+                        value={coinCount}
+                        one='# finalized clawback'
+                        other='# finalized clawbacks'
+                      />
+                    ) : null}
                   </div>
                 </div>
               </div>
@@ -224,10 +316,17 @@ export function TokenConfirmation({
 
       {type === 'issue' && (
         <div className='text-muted-foreground'>
-          <Trans>
-            Once issued, this token will appear in your wallet. You can then
-            send it to other addresses or create offers to trade it.
-          </Trans>
+          {offersEnabled ? (
+            <Trans>
+              Once issued, this token will appear in your wallet. You can then
+              send it to other addresses or create offers to trade it.
+            </Trans>
+          ) : (
+            <Trans>
+              Once issued, this token will appear in your wallet. You can then
+              send it to other addresses.
+            </Trans>
+          )}
         </div>
       )}
     </div>

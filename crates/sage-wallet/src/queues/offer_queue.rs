@@ -4,12 +4,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use chia::protocol::Bytes32;
-use chia_wallet_sdk::driver::{decode_offer, Offer};
-use clvmr::Allocator;
+use chia_wallet_sdk::{driver::decode_offer, prelude::*};
 use sage_database::{Database, OfferStatus};
 use tokio::{
-    sync::{mpsc, Mutex},
+    sync::{Mutex, mpsc},
     time::sleep,
 };
 use tracing::warn;
@@ -101,7 +99,7 @@ impl OfferQueue {
                 warn!("Coin lookup failed for {}: {}", peer.socket_addr(), err);
                 self.state.lock().await.ban(
                     peer.socket_addr().ip(),
-                    Duration::from_secs(300),
+                    Duration::from_mins(5),
                     "coin lookup failed",
                 );
                 return Ok(());

@@ -2,6 +2,7 @@ import Container from '@/components/Container';
 import { MakeOfferConfirmationDialog } from '@/components/dialogs/MakeOfferConfirmationDialog';
 import { OfferCreationProgressDialog } from '@/components/dialogs/OfferCreationProgressDialog';
 import Header from '@/components/Header';
+import { ReadOnlyButton } from '@/components/ReadOnlyButton';
 import { AssetSelector } from '@/components/selectors/AssetSelector';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -86,6 +87,20 @@ export function MakeOffer() {
       });
       return;
     }
+
+    if (
+      !hasOfferedTokens &&
+      !hasOfferedNfts &&
+      !hasOfferedOptions &&
+      parseFloat(state.fee || '0') === 0
+    ) {
+      addError({
+        kind: 'invalid',
+        reason: t`A request-only offer requires a network fee.`,
+      });
+      return;
+    }
+
     setIsConfirmDialogOpen(true);
   };
 
@@ -130,6 +145,7 @@ export function MakeOffer() {
                 setAssets={(assets) => setState({ offered: assets })}
                 splitNftOffers={splitNftOffers}
                 setSplitNftOffers={setSplitNftOffers}
+                fee={state.fee}
               />
             </CardContent>
           </Card>
@@ -292,9 +308,13 @@ export function MakeOffer() {
           >
             <Trans>Cancel Offer</Trans>
           </Button>
-          <Button disabled={invalid} onClick={makeAction}>
+          <ReadOnlyButton
+            requiresSigning
+            disabled={invalid}
+            onClick={makeAction}
+          >
             <Trans>Create Offer</Trans>
-          </Button>
+          </ReadOnlyButton>
         </div>
 
         <MakeOfferConfirmationDialog

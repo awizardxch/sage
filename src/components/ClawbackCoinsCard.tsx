@@ -18,15 +18,17 @@ import {
   FormMessage,
 } from '@/components/ui/form';
 import { useErrors } from '@/hooks/useErrors';
+import { useNetwork } from '@/hooks/useNetwork';
 import { amount } from '@/lib/formTypes';
 import { toMojos } from '@/lib/utils';
+import { useWallet } from '@/contexts/WalletContext';
 import { useWalletState } from '@/state';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { t } from '@lingui/core/macro';
 import { Trans } from '@lingui/react/macro';
 import { RowSelectionState } from '@tanstack/react-table';
 import BigNumber from 'bignumber.js';
-import { UndoIcon, XIcon } from 'lucide-react';
+import { CheckIcon, UndoIcon, XIcon } from 'lucide-react';
 import {
   Dispatch,
   SetStateAction,
@@ -61,8 +63,10 @@ export function ClawbackCoinsCard({
   setSelectedCoins,
 }: ClawbackCoinsCardProps) {
   const walletState = useWalletState();
+  const { isTransactionDisabled } = useWallet();
 
   const { addError } = useErrors();
+  const { isTestnet } = useNetwork();
 
   const [selectedCoinRecords, setSelectedCoinRecords] = useState<CoinRecord[]>(
     [],
@@ -73,6 +77,10 @@ export function ClawbackCoinsCard({
   const [sortMode, setSortMode] = useState<CoinSortMode>('created_height');
   const [sortDirection, setSortDirection] = useState<boolean>(false); // false = descending, true = ascending
   const [includeSpentCoins, setIncludeSpentCoins] = useState<boolean>(false);
+  const [canClawBack, setCanClawBack] = useState(false);
+  const [clawBackOpen, setClawBackOpen] = useState(false);
+  const [finalizeOpen, setFinalizeOpen] = useState(false);
+
   const pageSize = 10;
 
   // Use ref to track current page to avoid dependency issues
@@ -104,8 +112,6 @@ export function ClawbackCoinsCard({
     });
   }, [selectedCoinIds, coins]);
 
-  const [canClawBack, setCanClawBack] = useState(false);
-
   useEffect(() => {
     let isMounted = true;
 
@@ -123,7 +129,7 @@ export function ClawbackCoinsCard({
         });
 
         if (isMounted) {
-          setCanClawBack(selectedCoinIds.length > 0 && isSpendable.spendable);
+          setCanClawBack(isSpendable.spendable);
         }
       } catch (error) {
         console.error('Error checking if coins are spendable:', error);
@@ -189,11 +195,10 @@ export function ClawbackCoinsCard({
     updateCoins(currentPage);
   }, [currentPage, updateCoins]);
 
-  const [clawBackOpen, setClawBackOpen] = useState(false);
-
   const clawBackFormSchema = z.object({
     clawBackFee: amount(walletState.sync.unit.precision).refine(
-      (amount) => BigNumber(walletState.sync.balance).gte(amount || 0),
+      (amount) =>
+        BigNumber(walletState.sync.selectable_balance).gte(amount || 0),
       t`Not enough funds to cover the fee`,
     ),
   });
@@ -219,7 +224,7 @@ export function ClawbackCoinsCard({
         // Add confirmation data to the response
         const resultWithDetails = Object.assign({}, result, {
           additionalData: {
-            title: t`Claw back Details`,
+            title: t`Claw Back Details`,
             content: {
               type: 'clawback',
               coins: selectedCoinRecords,
@@ -235,9 +240,55 @@ export function ClawbackCoinsCard({
       .finally(() => setClawBackOpen(false));
   };
 
+  const finalizeFormSchema = z.object({
+    finalizeFee: amount(walletState.sync.unit.precision).refine(
+      (amount) =>
+        BigNumber(walletState.sync.selectable_balance).gte(amount || 0),
+      t`Not enough funds to cover the fee`,
+    ),
+  });
+
+  const finalizeForm = useForm<z.infer<typeof finalizeFormSchema>>({
+    resolver: zodResolver(finalizeFormSchema),
+  });
+
+  const onFinalizeSubmit = (values: z.infer<typeof finalizeFormSchema>) => {
+    const fee = toMojos(values.finalizeFee, walletState.sync.unit.precision);
+
+    // Get IDs from the selected coin records
+    const coinIdsForRequest = selectedCoinRecords.map(
+      (record) => record.coin_id,
+    );
+
+    commands
+      .finalizeClawback({
+        coin_ids: coinIdsForRequest,
+        fee,
+      })
+      .then((result) => {
+        // Add confirmation data to the response
+        const resultWithDetails = Object.assign({}, result, {
+          additionalData: {
+            title: t`Finalize Clawback Details`,
+            content: {
+              type: 'finalize_clawback',
+              coins: selectedCoinRecords,
+              ticker: asset.ticker,
+              precision: asset.precision,
+            },
+          },
+        });
+
+        setResponse(resultWithDetails);
+      })
+      .catch(addError)
+      .finally(() => setFinalizeOpen(false));
+  };
+
   const pageCount = Math.ceil(totalCoins / pageSize);
   const selectedCoinCount = selectedCoinIds.length;
   const selectedCoinLabel = selectedCoinCount === 1 ? t`coin` : t`coins`;
+  const ticker = asset.ticker;
 
   if (!totalCoins) return null;
 
@@ -252,6 +303,7 @@ export function ClawbackCoinsCard({
         <CoinList
           clawback={true}
           precision={asset.precision}
+          isTestnet={isTestnet}
           coins={coins}
           selectedCoins={selectedCoins}
           setSelectedCoins={setSelectedCoins}
@@ -269,13 +321,28 @@ export function ClawbackCoinsCard({
             <>
               <Button
                 variant='outline'
-                disabled={!canClawBack}
+                disabled={isTransactionDisabled || !canClawBack}
                 onClick={() => {
                   if (canClawBack) setClawBackOpen(true);
                 }}
               >
                 <UndoIcon className='mr-2 h-4 w-4' />
                 <Trans>Claw Back</Trans>
+              </Button>
+
+              <Button
+                variant='outline'
+                disabled={
+                  isTransactionDisabled ||
+                  selectedCoinIds.length === 0 ||
+                  canClawBack
+                }
+                onClick={() => {
+                  setFinalizeOpen(true);
+                }}
+              >
+                <CheckIcon className='mr-2 h-4 w-4' />
+                <Trans>Finalize</Trans>
               </Button>
             </>
           }
@@ -300,7 +367,7 @@ export function ClawbackCoinsCard({
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              <Trans>Claw Back {asset.ticker}</Trans>
+              <Trans>Claw Back {ticker}</Trans>
             </DialogTitle>
             <DialogDescription>
               <Trans>This will claw back all of the selected coins.</Trans>
@@ -336,6 +403,57 @@ export function ClawbackCoinsCard({
                 </Button>
                 <Button type='submit'>
                   <Trans>Claw Back</Trans>
+                </Button>
+              </DialogFooter>
+            </form>
+          </Form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={finalizeOpen} onOpenChange={setFinalizeOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              <Trans>Finalize {ticker} Clawback</Trans>
+            </DialogTitle>
+            <DialogDescription>
+              <Trans>
+                This will complete the clawback for all of the selected coins,
+                and send the funds to the original recipient (even if the
+                recipient wallet does not support clawbacks).
+              </Trans>
+            </DialogDescription>
+          </DialogHeader>
+          <Form {...finalizeForm}>
+            <form
+              onSubmit={finalizeForm.handleSubmit(onFinalizeSubmit)}
+              className='space-y-4'
+            >
+              <FormField
+                control={finalizeForm.control}
+                name='finalizeFee'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>
+                      <Trans>Network Fee</Trans>
+                    </FormLabel>
+                    <FormControl>
+                      <FeeAmountInput {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <DialogFooter className='gap-2'>
+                <Button
+                  type='button'
+                  variant='outline'
+                  onClick={() => setFinalizeOpen(false)}
+                >
+                  <Trans>Cancel</Trans>
+                </Button>
+                <Button type='submit'>
+                  <Trans>Finalize</Trans>
                 </Button>
               </DialogFooter>
             </form>

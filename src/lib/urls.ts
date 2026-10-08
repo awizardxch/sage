@@ -20,6 +20,12 @@ function mintGardenApiBase(isTestnet: boolean): string {
   return `https://api${isTestnet ? '.testnet' : ''}.mintgarden.io`;
 }
 
+function forgeApiBase(isTestnet: boolean): string {
+  return isTestnet
+    ? 'https://forge-responder.up.railway.app'
+    : 'https://forge-ui-production.up.railway.app';
+}
+
 // ── Spacescan ─────────────────────────────────────────────────────────────────
 
 export function spacescanCoinUrl(coinId: string, isTestnet: boolean): string {
@@ -83,6 +89,13 @@ export function mintGardenDidUrl(did: string, isTestnet: boolean): string {
 
 export function mintGardenApiUrl(path: string, isTestnet: boolean): string {
   return `${mintGardenApiBase(isTestnet)}/${path}`;
+}
+
+// ── Forge — API ──────────────────────────────────────────────────────────────
+// `path` must include the API version prefix (e.g. 'v1/prices/tickers').
+
+export function forgeApiUrl(path: string, isTestnet: boolean): string {
+  return `${forgeApiBase(isTestnet)}/api/${path}`;
 }
 
 // ── ChiaOffer — API ─────────────────────────────────────────────────────────

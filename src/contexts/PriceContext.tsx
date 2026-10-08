@@ -1,5 +1,5 @@
 import { useNetwork } from '@/hooks/useNetwork';
-import { dexieApiUrl } from '@/lib/urls';
+import { dexieApiUrl, forgeApiUrl } from '@/lib/urls';
 import {
   createContext,
   ReactNode,
@@ -56,32 +56,58 @@ export function PriceProvider({ children }: { children: ReactNode }) {
       intervalRef.current = null;
     }
 
-    const fetchCatPrices = async () => {
-      try {
-        const response = await fetch(
-          dexieApiUrl('v3/prices/tickers', isTestnet),
-        );
+    const fetchTickers = async (url: string): Promise<DexieTicker[]> => {
+      const response = await fetch(url);
 
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
-        }
-
-        const data: DexieResponse = await response.json();
-        const tickers = data.tickers.reduce(
-          (acc: Record<string, CatPriceData>, ticker: DexieTicker) => {
-            acc[ticker.base_currency.toLowerCase()] = {
-              lastPrice: ticker.last_price ? Number(ticker.last_price) : null,
-              askPrice: ticker.ask ? Number(ticker.ask) : null,
-            };
-            return acc;
-          },
-          {},
-        );
-        setCatPrices(tickers);
-      } catch (error) {
-        console.error('Failed to fetch CAT prices:', error);
-        setCatPrices({});
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
       }
+
+      const data: DexieResponse = await response.json();
+      return Array.isArray(data.tickers) ? data.tickers : [];
+    };
+
+    const fetchCatPrices = async () => {
+      // Dexie prices tokens from offers completed on Dexie. A token that trades
+      // through Forge's pools never appears there, so Forge's tickers (the mid of
+      // each token's deepest XCH pool, in Dexie's ticker shape) fill the gaps.
+      // Dexie stays the primary source: Forge only prices tokens Dexie has no
+      // last price for, and either source failing leaves the other in place.
+      const [dexie, forge] = await Promise.allSettled([
+        fetchTickers(dexieApiUrl('v3/prices/tickers', isTestnet)),
+        fetchTickers(forgeApiUrl('v1/prices/tickers', isTestnet)),
+      ]);
+
+      if (dexie.status === 'rejected') {
+        console.error('Failed to fetch CAT prices from Dexie:', dexie.reason);
+      }
+      if (forge.status === 'rejected') {
+        console.warn('Failed to fetch CAT prices from Forge:', forge.reason);
+      }
+
+      const tickers: Record<string, CatPriceData> = {};
+      const add = (ticker: DexieTicker) => {
+        const assetId = ticker.base_currency?.toLowerCase();
+        if (!assetId) return;
+        const lastPrice = ticker.last_price ? Number(ticker.last_price) : null;
+        const askPrice = ticker.ask ? Number(ticker.ask) : null;
+        const prior = tickers[assetId];
+        tickers[assetId] = {
+          lastPrice:
+            lastPrice !== null && Number.isFinite(lastPrice)
+              ? lastPrice
+              : (prior?.lastPrice ?? null),
+          askPrice:
+            askPrice !== null && Number.isFinite(askPrice)
+              ? askPrice
+              : (prior?.askPrice ?? null),
+        };
+      };
+
+      if (forge.status === 'fulfilled') forge.value.forEach(add);
+      if (dexie.status === 'fulfilled') dexie.value.forEach(add);
+
+      setCatPrices(tickers);
     };
 
     const fetchChiaPrice = async () => {
